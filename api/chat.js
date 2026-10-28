@@ -26,29 +26,45 @@ const GEMINI_TOOLS = [
   },
 ];
 
+// 기본 모델이 붐비면(503 등) 한 번 더 시도하고, 그래도 안 되면 가벼운 모델로 바꿔 시도한다
+const MODELS = [MODEL, "gemini-flash-lite-latest"];
+const RETRY_STATUS = [429, 500, 503, 504];
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 async function callGemini(contents) {
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-goog-api-key": process.env.GEMINI_API_KEY,
-      },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: SYSTEM() }] },
-        contents,
-        tools: GEMINI_TOOLS,
-        generationConfig: { maxOutputTokens: 1024 },
-      }),
-      signal: AbortSignal.timeout(25000), // 25초 안에 응답이 없으면 오류로 처리
+  let lastError;
+  for (const model of MODELS) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt) await sleep(1000);
+      try {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-goog-api-key": process.env.GEMINI_API_KEY,
+            },
+            body: JSON.stringify({
+              systemInstruction: { parts: [{ text: SYSTEM() }] },
+              contents,
+              tools: GEMINI_TOOLS,
+              generationConfig: { maxOutputTokens: 1024 },
+            }),
+            signal: AbortSignal.timeout(12000), // 12초 안에 응답이 없으면 다음 시도
+          }
+        );
+        if (res.ok) return res.json();
+        const body = await res.text();
+        lastError = new Error(`Gemini API ${res.status} (${model}): ${body.slice(0, 200)}`);
+        if (!RETRY_STATUS.includes(res.status)) throw lastError; // 키 · 요청 오류는 재시도해도 소용없음
+      } catch (e) {
+        if (e === lastError) throw e;
+        lastError = e; // 시간 초과 · 네트워크 오류는 재시도
+      }
     }
-  );
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Gemini API ${res.status}: ${body.slice(0, 300)}`);
   }
-  return res.json();
+  throw lastError;
 }
 
 module.exports = async (req, res) => {
