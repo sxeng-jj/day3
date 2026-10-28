@@ -41,9 +41,13 @@ async function callGemini(contents) {
         tools: GEMINI_TOOLS,
         generationConfig: { maxOutputTokens: 1024 },
       }),
+      signal: AbortSignal.timeout(25000), // 25초 안에 응답이 없으면 오류로 처리
     }
   );
-  if (!res.ok) throw new Error(`Gemini API ${res.status}`);
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Gemini API ${res.status}: ${body.slice(0, 300)}`);
+  }
   return res.json();
 }
 

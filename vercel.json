@@ -1,7 +1,8 @@
 {
   "functions": {
     "api/chat.js": {
-      "includeFiles": "jeju_spots.json"
+      "includeFiles": "jeju_spots.json",
+      "maxDuration": 60
     }
   }
 }

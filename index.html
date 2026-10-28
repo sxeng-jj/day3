@@ -49,9 +49,10 @@
                     method: "POST",
                     headers: { "content-type": "application/json" },
                     body: JSON.stringify({ message }),
+                    signal: AbortSignal.timeout(58000),
                 })
                 const d = await r.json()
-                if (!r.ok) throw new Error(d.error || "요청 실패")
+                if (!r.ok) throw new Error((d.error || "요청 실패") + (d.detail ? " (" + d.detail + ")" : ""))
 
                 $("trace").textContent = "사용한 도구: " +
                     (d.trace.length ? d.trace.map((t) => `${t.tool}(${JSON.stringify(t.input)})`).join(" → ") : "없음")
@@ -65,7 +66,7 @@
                 if (d.spots.length) map.fitBounds(d.spots.map((s) => [s.lat, s.lon]), { padding: [40, 40] })
             } catch (e) {
                 $("trace").textContent = ""
-                $("answer").textContent = "오류: " + e.message
+                $("answer").textContent = "오류: " + (e.name === "TimeoutError" ? "응답 시간이 초과됐습니다. 잠시 후 다시 시도하세요." : e.message)
             }
             $("go").disabled = false
         }
