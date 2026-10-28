@@ -1,6 +1,7 @@
 const { toolDefinitions, handlers } = require("../lib/tools");
 
-const MODEL = "claude-sonnet-5-5";
+// 모델은 Vercel 환경 변수 GEMINI_MODEL 로 바꿀 수 있다 (기본: 항상 최신 Flash 를 가리키는 별칭)
+const MODEL = process.env.GEMINI_MODEL || "gemini-flash-latest";
 const MAX_STEPS = 6; // 도구 호출 왕복 상한
 const MAX_INPUT = 500; // 사용자 입력 글자 수 상한
 
@@ -14,58 +15,76 @@ const SYSTEM = () =>
 - 장소는 find_spots 결과에 있는 것만 추천한다. 목록 밖 장소는 없다. 지어내지 않는다.
 - 답변은 한국어로 짧게: 날씨 한 줄 요약, 추천 장소와 이유.`;
 
-async function callClaude(messages) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": process.env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      max_tokens: 1024,
-      system: SYSTEM(),
-      tools: toolDefinitions,
-      messages,
-    }),
-  });
-  if (!res.ok) throw new Error(`Claude API ${res.status}`);
+// Gemini 는 도구 스키마를 functionDeclarations 의 parameters 로 받는다 (Claude 의 input_schema 와 같은 JSON 스키마)
+const GEMINI_TOOLS = [
+  {
+    functionDeclarations: toolDefinitions.map((t) => ({
+      name: t.name,
+      description: t.description,
+      parameters: t.input_schema,
+    })),
+  },
+];
+
+async function callGemini(contents) {
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-goog-api-key": process.env.GEMINI_API_KEY,
+      },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: SYSTEM() }] },
+        contents,
+        tools: GEMINI_TOOLS,
+        generationConfig: { maxOutputTokens: 1024 },
+      }),
+    }
+  );
+  if (!res.ok) throw new Error(`Gemini API ${res.status}`);
   return res.json();
 }
 
 module.exports = async (req, res) => {
   if (req.method !== "POST") return res.status(405).json({ error: "POST 만 가능합니다." });
-  if (!process.env.ANTHROPIC_API_KEY) {
-    return res.status(500).json({ error: "서버에 ANTHROPIC_API_KEY 가 설정되지 않았습니다." });
+  if (!process.env.GEMINI_API_KEY) {
+    return res.status(500).json({ error: "서버에 GEMINI_API_KEY 가 설정되지 않았습니다." });
   }
 
   const text = String((req.body && req.body.message) || "").trim().slice(0, MAX_INPUT);
   if (!text) return res.status(400).json({ error: "message 가 비어 있습니다." });
 
-  const messages = [{ role: "user", content: text }];
+  const contents = [{ role: "user", parts: [{ text }] }];
   const trace = []; // 화면에 보여줄 도구 호출 기록
   let spots = []; // 지도에 찍을 장소(마지막 find_spots 결과)
 
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
-      const reply = await callClaude(messages);
-      messages.push({ role: "assistant", content: reply.content });
+      const data = await callGemini(contents);
+      const content = data.candidates && data.candidates[0] && data.candidates[0].content;
+      if (!content || !content.parts) {
+        return res.status(200).json({ answer: "답변을 만들지 못했습니다. 질문을 바꿔 다시 해 주세요.", spots, trace });
+      }
+      // 모델 응답은 받은 그대로 되돌려 보낸다(생각 서명 등 포함)
+      contents.push(content);
 
-      if (reply.stop_reason !== "tool_use") {
-        const answer = reply.content.filter((b) => b.type === "text").map((b) => b.text).join("\n");
+      const calls = content.parts.filter((p) => p.functionCall);
+      if (!calls.length) {
+        const answer = content.parts.filter((p) => p.text && !p.thought).map((p) => p.text).join("\n");
         return res.status(200).json({ answer, spots, trace });
       }
 
-      const results = [];
-      for (const block of reply.content.filter((b) => b.type === "tool_use")) {
-        const handler = handlers[block.name];
-        const out = handler ? await handler(block.input) : { error: "알 수 없는 도구" };
-        trace.push({ tool: block.name, input: block.input });
-        if (block.name === "find_spots" && out.spots) spots = out.spots;
-        results.push({ type: "tool_result", tool_use_id: block.id, content: JSON.stringify(out) });
+      const responses = [];
+      for (const { functionCall } of calls) {
+        const handler = handlers[functionCall.name];
+        const out = handler ? await handler(functionCall.args || {}) : { error: "알 수 없는 도구" };
+        trace.push({ tool: functionCall.name, input: functionCall.args || {} });
+        if (functionCall.name === "find_spots" && out.spots) spots = out.spots;
+        responses.push({ functionResponse: { name: functionCall.name, response: out } });
       }
-      messages.push({ role: "user", content: results });
+      contents.push({ role: "user", parts: responses });
     }
     return res.status(200).json({ answer: "도구 호출이 너무 길어져 중단했습니다. 질문을 단순하게 다시 해 주세요.", spots, trace });
   } catch (e) {
