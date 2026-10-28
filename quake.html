@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>실시간 지진 지도</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <style>
+        body { margin: 0; font-family: sans-serif; }
+        #bar { padding: 8px 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+        #map { height: calc(100vh - 90px); }
+        #msg { padding: 0 12px 6px; color: #555; font-size: 14px; }
+        .legend { background: #fff; padding: 6px 10px; border-radius: 6px; line-height: 1.5; font-size: 13px; }
+        .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 6px; }
+    </style>
+</head>
+<body>
+    <div id="bar">
+        <label>기간
+            <select id="period">
+                <option value="all_hour">최근 1시간</option>
+                <option value="all_day" selected>최근 24시간</option>
+                <option value="all_week">최근 7일</option>
+            </select>
+        </label>
+        <label>최소 규모
+            <select id="minmag">
+                <option value="0">전체</option>
+                <option value="2.5">2.5 이상</option>
+                <option value="4.5">4.5 이상</option>
+                <option value="6">6 이상</option>
+            </select>
+        </label>
+        <button id="go">새로고침</button>
+    </div>
+    <div id="msg"></div>
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // 규모별 색 (클수록 붉게)
+        const color = (m) => m >= 6 ? "#7f0000" : m >= 4.5 ? "#e31a1c" : m >= 2.5 ? "#fd8d3c" : "#fed976"
+
+        const map = L.map("map", { worldCopyJump: true }).setView([20, 130], 2)
+        L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+            attribution: "&copy; OpenStreetMap contributors · 지진 데이터: USGS",
+            maxZoom: 18,
+        }).addTo(map)
+        const layer = L.layerGroup().addTo(map)
+
+        const legend = L.control({ position: "bottomright" })
+        legend.onAdd = () => {
+            const d = L.DomUtil.create("div", "legend")
+            d.innerHTML = [["#fed976", "2.5 미만"], ["#fd8d3c", "2.5 ~ 4.5"], ["#e31a1c", "4.5 ~ 6"], ["#7f0000", "6 이상"]]
+                .map(([c, t]) => `<div><i style="background:${c}"></i>${t}</div>`).join("")
+            return d
+        }
+        legend.addTo(map)
+
+        const load = () => {
+            const period = document.getElementById("period").value
+            const minmag = Number(document.getElementById("minmag").value)
+            const msg = document.getElementById("msg")
+            msg.textContent = "불러오는 중…"
+            fetch(`https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/${period}.geojson`)
+                .then((r) => r.json())
+                .then((d) => {
+                    layer.clearLayers()
+                    const list = d.features.filter((f) => f.properties.mag !== null && f.properties.mag >= minmag)
+                    for (const f of list) {
+                        const [lon, lat, depth] = f.geometry.coordinates
+                        const p = f.properties
+                        L.circleMarker([lat, lon], {
+                            radius: Math.max(3, p.mag * 3),
+                            color: color(p.mag), fillColor: color(p.mag), fillOpacity: 0.6, weight: 1,
+                        }).addTo(layer).bindPopup(
+                            `<b>규모 ${p.mag}</b><br>${p.place}<br>깊이 ${depth} km<br>${new Date(p.time).toLocaleString("ko-KR")}<br><a href="${p.url}" target="_blank" rel="noopener">상세 보기</a>`
+                        )
+                    }
+                    const max = list.reduce((a, f) => Math.max(a, f.properties.mag), 0)
+                    msg.textContent = `${list.length}건` + (list.length ? ` · 최대 규모 ${max}` : "")
+                })
+                .catch(() => { msg.textContent = "지진 데이터를 불러오지 못했습니다. 잠시 후 새로고침하세요." })
+        }
+
+        document.getElementById("go").onclick = load
+        document.getElementById("period").onchange = load
+        document.getElementById("minmag").onchange = load
+        load()
+    </script>
+</body>
+</html>
